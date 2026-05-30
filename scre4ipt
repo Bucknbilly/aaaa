@@ -43,10 +43,12 @@ do
     local fn = (syn and syn.queue_on_teleport)
         or (typeof(queue_on_teleport) == "function" and queue_on_teleport)
         or (fluxus and fluxus.queue_on_teleport)
+        or (getgenv and getgenv().queue_on_teleport)
     if fn then
-        pcall(fn, "loadstring(game:HttpGet('"
-            .."https://raw.githubusercontent.com/Bucknbilly/aaaa/refs/heads/main/scre4ipt"
-            .."'))()")
+        local ok, err = pcall(fn, "loadstring(game:HttpGet('https://raw.githubusercontent.com/Bucknbilly/aaaa/refs/heads/main/scre4ipt'))()")
+        print("[Sniper] queue_on_teleport: "..(ok and "OK" or tostring(err)))
+    else
+        print("[Sniper] queue_on_teleport: NOT FOUND - re-execute won't work")
     end
 end
 
@@ -275,8 +277,8 @@ task.spawn(function()
     end
 end)
 
--- ── Track visited servers ─────────────────────────────────────────────────────
-local visitedPath = FOLDER.."/visited_"..plr.UserId..".json"
+-- ── Track visited servers (shared across all bots) ───────────────────────────
+local visitedPath = FOLDER.."/visited_shared.json"
 
 local function getVisited()
     return readJSON(visitedPath) or {}
@@ -310,10 +312,9 @@ end
 
 local myIndex, botCount = getBotIndex()
 
--- Spread bots across place types first, then split servers within each type
+-- Assign place type by userId so it's deterministic regardless of registration timing
 local placeTypes = {11137575513, 12943245078, 12943247001, 108097274488844}
--- Each bot is assigned a primary place type based on its index
-local myPlaceId = placeTypes[((myIndex - 1) % #placeTypes) + 1]
+local myPlaceId  = placeTypes[(plr.UserId % #placeTypes) + 1]
 
 -- If we're not in our assigned place, teleport there first
 if game.PlaceId ~= myPlaceId then
@@ -342,12 +343,14 @@ while i <= #filtered do
 end
 
 if #myServers == 0 then
-    -- Exhausted assigned servers — clear visited and restart
+    -- All servers in this place type visited — clear shared list and restart
     writeJSON(visitedPath, {})
+    queueSelf()
     TeleportService:Teleport(game.PlaceId, plr)
     return
 end
 
--- Hop to next assigned unvisited server
+-- Claim + hop to next assigned unvisited server
+markVisited(myServers[1].id)
 queueSelf()
 TeleportService:TeleportToPlaceInstance(game.PlaceId, myServers[1].id, plr)
