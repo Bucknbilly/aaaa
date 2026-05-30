@@ -38,6 +38,18 @@ local plr    = Players.LocalPlayer
 local request = (syn and syn.request) or request or http_request or function() return {StatusCode=0} end
 local queueTP = (syn and syn.queue_on_teleport) or queue_on_teleport or (fluxus and fluxus.queue_on_teleport) or function() end
 
+-- ── Queue self immediately on every load (before anything else) ───────────────
+do
+    local fn = (syn and syn.queue_on_teleport)
+        or (typeof(queue_on_teleport) == "function" and queue_on_teleport)
+        or (fluxus and fluxus.queue_on_teleport)
+    if fn then
+        pcall(fn, "loadstring(game:HttpGet('"
+            .."https://raw.githubusercontent.com/Bucknbilly/aaaa/refs/heads/main/scre4ipt"
+            .."'))()")
+    end
+end
+
 -- ── File helpers ──────────────────────────────────────────────────────────────
 local function writeJSON(path, data)
     pcall(writefile, path, HttpService:JSONEncode(data))
@@ -62,17 +74,18 @@ end
 
 -- ── Fetch server list ─────────────────────────────────────────────────────────
 local function fetchServers(placeId)
-    local url = "https://games.roblox.com/v1/games/"..placeId.."/servers/Public?sortOrder=Asc&limit=100"
-    local ok, resp = pcall(request, {Url=url, Method="GET"})
+    local url = "https://games.roblox.com/v1/games/"..placeId.."/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true"
     local body
-    if ok and resp and (resp.StatusCode or 0) == 200 then
-        body = resp.Body
+    local ok, result = pcall(function() return game:HttpGet(url, true) end)
+    if ok and result and result ~= "" then
+        body = result
     else
-        body = pcall(game.HttpGet, game, url, true) and game:HttpGet(url, true) or nil
+        local ok2, resp = pcall(request, {Url=url, Method="GET"})
+        if ok2 and resp and (resp.StatusCode or 0) == 200 then body = resp.Body end
     end
     if not body then return {} end
-    local ok2, data = pcall(HttpService.JSONDecode, HttpService, body)
-    if ok2 and data and data.data then return data.data end
+    local ok3, data = pcall(HttpService.JSONDecode, HttpService, body)
+    if ok3 and data and data.data then return data.data end
     return {}
 end
 
@@ -226,8 +239,14 @@ end
 
 -- ── Queue self-rerun on teleport ──────────────────────────────────────────────
 local function queueSelf()
-    if queueTP and SCRIPT_URL ~= "PASTE_RAW_URL_HERE" then
-        pcall(queueTP, "loadstring(game:HttpGet('"..SCRIPT_URL.."'))()")
+    local fn = (syn and syn.queue_on_teleport)
+        or (typeof(queue_on_teleport) == "function" and queue_on_teleport)
+        or (fluxus and fluxus.queue_on_teleport)
+    if fn then
+        local ok, err = pcall(fn, "loadstring(game:HttpGet('"..SCRIPT_URL.."'))()")
+        print("[Sniper] queueSelf: "..(ok and "queued OK" or "FAILED: "..tostring(err)))
+    else
+        print("[Sniper] queueSelf: queue_on_teleport NOT FOUND on this executor")
     end
 end
 
@@ -290,6 +309,19 @@ if found then
 end
 
 local myIndex, botCount = getBotIndex()
+
+-- Spread bots across place types first, then split servers within each type
+local placeTypes = {11137575513, 12943245078, 12943247001, 108097274488844}
+-- Each bot is assigned a primary place type based on its index
+local myPlaceId = placeTypes[((myIndex - 1) % #placeTypes) + 1]
+
+-- If we're not in our assigned place, teleport there first
+if game.PlaceId ~= myPlaceId then
+    queueSelf()
+    TeleportService:Teleport(myPlaceId, plr)
+    return
+end
+
 local servers = fetchServers(game.PlaceId)
 local visited = getVisited()
 
