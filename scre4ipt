@@ -1,6 +1,3 @@
---[[
-	WARNING: Heads up! This script has not been verified by ScriptBlox. Use at your own risk!
-]]
 -- sniper.lua | Multi-bot server hop sniper for TCO
 -- Each bot instance runs this. They coordinate via shared files.
 -- Bots split the server list evenly and hop until target is found.
@@ -9,7 +6,7 @@
 local WEBHOOK_URL     = "https://discord.com/api/webhooks/1510315625212543108/GTWrn1gg-fnKGKTB3PVIBQdg54GNgVENXCGxZ316g0fJdrxkp4FW0KMwoIVQsOEHQ1Ev"
 local PING_USER       = "<@1034630045198712862>"
 local FOLDER          = "SniperData"
-local SCRIPT_URL      = "PASTE_RAW_URL_HERE"  -- ← paste your raw script URL here
+local SCRIPT_URL      = "https://raw.githubusercontent.com/Bucknbilly/aaaa/refs/heads/main/scre4ipt"
 
 -- Target: read from file if exists, otherwise use the value below (first run only)
 local TARGET_USERNAME
