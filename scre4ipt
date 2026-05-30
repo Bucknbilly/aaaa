@@ -1,0 +1,324 @@
+--[[
+	WARNING: Heads up! This script has not been verified by ScriptBlox. Use at your own risk!
+]]
+-- sniper.lua | Multi-bot server hop sniper for TCO
+-- Each bot instance runs this. They coordinate via shared files.
+-- Bots split the server list evenly and hop until target is found.
+
+-- ══ CONFIG ════════════════════════════════════════════════════════════════════
+local WEBHOOK_URL     = "https://discord.com/api/webhooks/1510315625212543108/GTWrn1gg-fnKGKTB3PVIBQdg54GNgVENXCGxZ316g0fJdrxkp4FW0KMwoIVQsOEHQ1Ev"
+local PING_USER       = "<@1034630045198712862>"
+local FOLDER          = "SniperData"
+local SCRIPT_URL      = "PASTE_RAW_URL_HERE"  -- ← paste your raw script URL here
+
+-- Target: read from file if exists, otherwise use the value below (first run only)
+local TARGET_USERNAME
+pcall(makefolder, FOLDER)
+local _tf = FOLDER.."/target.txt"
+local _ok, _saved = pcall(readfile, _tf)
+if _ok and _saved and _saved ~= "" then
+    TARGET_USERNAME = _saved
+else
+    TARGET_USERNAME = "TargetNameHere"  -- ← set this on first run
+    pcall(writefile, _tf, TARGET_USERNAME)
+end
+
+-- TCO place IDs
+local PLACE_IDS = {
+    Normal = 11137575513,
+    XL     = 12943245078,
+    VC     = 12943247001,
+    OG     = 108097274488844,
+}
+-- ══ END CONFIG ════════════════════════════════════════════════════════════════
+
+local HttpService      = game:GetService("HttpService")
+local Players          = game:GetService("Players")
+local TeleportService  = game:GetService("TeleportService")
+local MarketplaceService = game:GetService("MarketplaceService")
+
+local plr    = Players.LocalPlayer
+local request = (syn and syn.request) or request or http_request or function() return {StatusCode=0} end
+local queueTP = (syn and syn.queue_on_teleport) or queue_on_teleport or (fluxus and fluxus.queue_on_teleport) or function() end
+
+-- ── File helpers ──────────────────────────────────────────────────────────────
+local function writeJSON(path, data)
+    pcall(writefile, path, HttpService:JSONEncode(data))
+end
+local function readJSON(path)
+    local ok, raw = pcall(readfile, path)
+    if not ok or not raw or raw == "" then return nil end
+    local ok2, v = pcall(HttpService.JSONDecode, HttpService, raw)
+    return ok2 and v or nil
+end
+
+-- ── Determine which place type we're in ───────────────────────────────────────
+local function getServerType()
+    local map = {
+        [11137575513]  = "Normal",
+        [12943245078]  = "XL",
+        [12943247001]  = "VC",
+        [108097274488844] = "OG",
+    }
+    return map[game.PlaceId] or "Unknown"
+end
+
+-- ── Fetch server list ─────────────────────────────────────────────────────────
+local function fetchServers(placeId)
+    local url = "https://games.roblox.com/v1/games/"..placeId.."/servers/Public?sortOrder=Asc&limit=100"
+    local ok, resp = pcall(request, {Url=url, Method="GET"})
+    local body
+    if ok and resp and (resp.StatusCode or 0) == 200 then
+        body = resp.Body
+    else
+        body = pcall(game.HttpGet, game, url, true) and game:HttpGet(url, true) or nil
+    end
+    if not body then return {} end
+    local ok2, data = pcall(HttpService.JSONDecode, HttpService, body)
+    if ok2 and data and data.data then return data.data end
+    return {}
+end
+
+-- ── Bot index: each bot writes its userId, reads all registered bots ──────────
+local function registerBot()
+    local path = FOLDER.."/bot_"..plr.UserId..".json"
+    writeJSON(path, {userId=plr.UserId, name=plr.Name, time=tick()})
+end
+
+local function getBotIds()
+    local ids = {}
+    local ok, files = pcall(listfiles, FOLDER)
+    if not ok then return {plr.UserId} end
+    for _, f in ipairs(files) do
+        if f:find("bot_") then
+            local data = readJSON(f)
+            if data and data.userId then
+                table.insert(ids, data.userId)
+            end
+        end
+    end
+    table.sort(ids)
+    return ids
+end
+
+local function getBotIndex()
+    local ids = getBotIds()
+    for i, id in ipairs(ids) do
+        if id == plr.UserId then return i, #ids end
+    end
+    return 1, 1
+end
+
+-- ── Check if target is in current server ─────────────────────────────────────
+local function checkCurrentServer()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Name:lower() == TARGET_USERNAME:lower() then
+            return p
+        end
+    end
+    return nil
+end
+
+-- ── Get target player info ────────────────────────────────────────────────────
+local function getTargetInfo(targetPlr)
+    local hasEnlighten = false
+    local isAdmin      = false
+    local timeVal      = nil
+
+    pcall(function()
+        hasEnlighten = targetPlr.Backpack:FindFirstChild("The Arkenstone") ~= nil
+            or (targetPlr.Character and targetPlr.Character:FindFirstChild("The Arkenstone") ~= nil)
+    end)
+    pcall(function()
+        isAdmin = targetPlr.Team ~= nil and targetPlr.Team.Name == "Chosen"
+    end)
+    pcall(function()
+        local ls = targetPlr:FindFirstChild("leaderstats")
+        if ls and ls:FindFirstChild("Time") then
+            timeVal = ls.Time.Value
+        end
+    end)
+
+    return hasEnlighten, isAdmin, timeVal
+end
+
+-- ── Send found webhook ────────────────────────────────────────────────────────
+local function sendFoundWebhook(targetPlr)
+    local hasEnlighten, isAdmin, timeVal = getTargetInfo(targetPlr)
+    local serverType = getServerType()
+    local jobId      = tostring(game.JobId or "")
+    local placeId    = game.PlaceId
+
+    local joinURL = string.format(
+    "[Join Server](roblox://experiences/start?placeId=%d&gameInstanceId=%s)",
+    placeId, jobId
+)
+
+    local statusParts = {}
+    if hasEnlighten then table.insert(statusParts, "✨ Enlightened") end
+    if isAdmin       then table.insert(statusParts, "👑 Admin") end
+    if timeVal       then table.insert(statusParts, "⏱ Time: "..tostring(timeVal)) end
+    local statusStr = #statusParts > 0 and table.concat(statusParts, " | ") or "No special status"
+
+    local embed = {
+        title       = "🎯 Target Found: "..TARGET_USERNAME,
+        description = PING_USER.."\n"..joinURL,
+        color       = 0xFF4444,
+        thumbnail   = {
+            url = string.format(
+                "https://www.roblox.com/headshot-thumbnail/image?userId=%d&width=420&height=420&format=png",
+                targetPlr.UserId
+            )
+        },
+        fields = {
+            {
+                name   = "👤 Target",
+                value  = string.format("**%s** (`%s`)\nID: `%d`", targetPlr.DisplayName, targetPlr.Name, targetPlr.UserId),
+                inline = true
+            },
+            {
+                name   = "🎮 Server",
+                value  = string.format("**%s** — %s\n%d/%d players\nJob ID: `%s`",
+                    serverType, serverType,
+                    #Players:GetPlayers(), Players.MaxPlayers,
+                    jobId ~= "" and jobId or "unknown"),
+                inline = true
+            },
+            {
+                name   = "⚡ Status",
+                value  = statusStr,
+                inline = false
+            },
+            {
+                name   = "🤖 Found by",
+                value  = plr.Name.." (`"..plr.UserId.."`)",
+                inline = false
+            }
+        },
+        footer    = {text = "MikeyHub Sniper"},
+        timestamp = DateTime.now():ToIsoDate()
+    }
+
+    pcall(request, {
+        Url     = WEBHOOK_URL,
+        Method  = "POST",
+        Headers = {["Content-Type"] = "application/json"},
+        Body    = HttpService:JSONEncode({content = PING_USER, embeds = {embed}})
+    })
+end
+
+-- ── Cleanup all sniper data ───────────────────────────────────────────────────
+local function cleanupAll()
+    pcall(function()
+        local files = listfiles(FOLDER)
+        for _, f in ipairs(files) do
+            pcall(delfile, f)
+        end
+    end)
+end
+
+-- ── Signal found to all bots + cleanup ───────────────────────────────────────
+local function signalFound()
+    writeJSON(FOLDER.."/found.json", {found=true, by=plr.UserId, time=tick()})
+end
+
+local function isFound()
+    local data = readJSON(FOLDER.."/found.json")
+    return data and data.found == true
+end
+
+-- ── Queue self-rerun on teleport ──────────────────────────────────────────────
+local function queueSelf()
+    if queueTP and SCRIPT_URL ~= "PASTE_RAW_URL_HERE" then
+        pcall(queueTP, "loadstring(game:HttpGet('"..SCRIPT_URL.."'))()")
+    end
+end
+
+-- ── Live found-signal watcher (shuts down this instance if another bot found target) ──
+local watching = true
+task.spawn(function()
+    while watching do
+        task.wait(2)
+        if isFound() then
+            watching = false
+            cleanupAll()
+            pcall(function() game:Shutdown() end)
+        end
+    end
+end)
+
+-- ── Live watcher: shut down immediately if another bot found target ───────────
+task.spawn(function()
+    while true do
+        task.wait(2)
+        if isFound() then
+            cleanupAll()
+            pcall(function() game:Shutdown() end)
+            return
+        end
+    end
+end)
+
+-- ── Track visited servers ─────────────────────────────────────────────────────
+local visitedPath = FOLDER.."/visited_"..plr.UserId..".json"
+
+local function getVisited()
+    return readJSON(visitedPath) or {}
+end
+
+local function markVisited(jobId)
+    local v = getVisited()
+    v[jobId] = true
+    writeJSON(visitedPath, v)
+end
+
+-- ── Main sniper loop ──────────────────────────────────────────────────────────
+registerBot()
+task.wait(2)
+
+if isFound() then return end
+
+-- Mark current server as visited
+markVisited(game.JobId)
+
+-- Check current server first
+local found = checkCurrentServer()
+if found then
+    sendFoundWebhook(found)
+    signalFound()
+    task.wait(1) -- give other bots a moment to read found.json
+    cleanupAll()
+    pcall(function() game:Shutdown() end)
+    return
+end
+
+local myIndex, botCount = getBotIndex()
+local servers = fetchServers(game.PlaceId)
+local visited = getVisited()
+
+-- Filter: skip current server and already visited
+local filtered = {}
+for _, s in ipairs(servers) do
+    if s.id ~= game.JobId and not visited[s.id] then
+        table.insert(filtered, s)
+    end
+end
+
+-- Assign slice to this bot
+local myServers = {}
+local i = myIndex
+while i <= #filtered do
+    table.insert(myServers, filtered[i])
+    i = i + botCount
+end
+
+if #myServers == 0 then
+    -- Exhausted assigned servers — clear visited and restart
+    writeJSON(visitedPath, {})
+    TeleportService:Teleport(game.PlaceId, plr)
+    return
+end
+
+-- Hop to next assigned unvisited server
+queueSelf()
+TeleportService:TeleportToPlaceInstance(game.PlaceId, myServers[1].id, plr)
