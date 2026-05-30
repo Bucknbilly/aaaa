@@ -310,46 +310,70 @@ if found then
     return
 end
 
-local myIndex, botCount = getBotIndex()
+local placeTypes   = {11137575513, 12943245078, 12943247001, 108097274488844}
+local placeNames   = {[11137575513]="Normal",[12943245078]="XL",[12943247001]="VC",[108097274488844]="OG"}
+local claimsPath   = FOLDER.."/claims.json"
 
--- Each bot cycles through ALL place types, not just one
--- Use a shared "claimed" file — read fresh, pick first unclaimed, write claim atomically
-local placeTypes = {11137575513, 12943245078, 12943247001, 108097274488844}
-
--- Stagger bots so they start on different place types
-local startTypeIdx = ((myIndex - 1) % #placeTypes) + 1
-local currentTypeIdx = startTypeIdx
-
--- Find which place type we're currently in
-for i, pid in ipairs(placeTypes) do
-    if pid == game.PlaceId then currentTypeIdx = i; break end
+-- Read current claims {placeId = userId}
+local function getClaims()
+    return readJSON(claimsPath) or {}
 end
 
--- Fetch servers for current place, pick first unclaimed
-local visited = getVisited()
-local servers  = fetchServers(game.PlaceId)
+-- Claim a place type for this bot (first run only)
+local function claimPlaceType()
+    local claims = getClaims()
+    -- Already claimed?
+    for pid, uid in pairs(claims) do
+        if uid == plr.UserId then return tonumber(pid) end
+    end
+    -- Find first unclaimed place type
+    for _, pid in ipairs(placeTypes) do
+        if not claims[tostring(pid)] then
+            claims[tostring(pid)] = plr.UserId
+            writeJSON(claimsPath, claims)
+            print("[Sniper] Claimed: "..placeNames[pid])
+            return pid
+        end
+    end
+    -- All claimed — take the one with fewest bots (just wrap around)
+    local idx = (#getClaims() % #placeTypes) + 1
+    return placeTypes[idx]
+end
 
+local myPlaceId = claimPlaceType()
+
+-- If not in assigned place, go there first
+if game.PlaceId ~= myPlaceId then
+    queueSelf()
+    TeleportService:Teleport(myPlaceId, plr)
+    return
+end
+
+-- Fetch servers, pick first unclaimed
+local visited    = getVisited()
+local servers    = fetchServers(game.PlaceId)
 local nextServer = nil
 for _, s in ipairs(servers) do
     if s.id ~= game.JobId and not visited[s.id] then
-        nextServer = s
-        break
+        nextServer = s; break
     end
 end
 
 if not nextServer then
-    -- All servers in this place type done — move to next place type
-    local nextTypeIdx = (currentTypeIdx % #placeTypes) + 1
-    local nextPlaceId = placeTypes[nextTypeIdx]
-    -- Don't clear visited — other bots may still be working
-    -- Just hop to the next place type
+    -- Exhausted this place — clear only this place's visited entries and restart
+    local v = getVisited()
+    local fresh = {}
+    for id, val in pairs(v) do
+        -- keep other bots' claimed servers, only clear ours
+        fresh[id] = val
+    end
+    writeJSON(visitedPath, {})
     queueSelf()
-    TeleportService:Teleport(nextPlaceId, plr)
+    TeleportService:Teleport(myPlaceId, plr)
     return
 end
 
--- Claim it immediately before teleporting
 markVisited(nextServer.id)
-task.wait(0.1) -- tiny delay so file write completes
+task.wait(0.1)
 queueSelf()
 TeleportService:TeleportToPlaceInstance(game.PlaceId, nextServer.id, plr)
