@@ -312,45 +312,44 @@ end
 
 local myIndex, botCount = getBotIndex()
 
--- Assign place type by userId so it's deterministic regardless of registration timing
+-- Each bot cycles through ALL place types, not just one
+-- Use a shared "claimed" file — read fresh, pick first unclaimed, write claim atomically
 local placeTypes = {11137575513, 12943245078, 12943247001, 108097274488844}
-local myPlaceId  = placeTypes[(plr.UserId % #placeTypes) + 1]
 
--- If we're not in our assigned place, teleport there first
-if game.PlaceId ~= myPlaceId then
-    queueSelf()
-    TeleportService:Teleport(myPlaceId, plr)
-    return
+-- Stagger bots so they start on different place types
+local startTypeIdx = ((myIndex - 1) % #placeTypes) + 1
+local currentTypeIdx = startTypeIdx
+
+-- Find which place type we're currently in
+for i, pid in ipairs(placeTypes) do
+    if pid == game.PlaceId then currentTypeIdx = i; break end
 end
 
-local servers = fetchServers(game.PlaceId)
+-- Fetch servers for current place, pick first unclaimed
 local visited = getVisited()
+local servers  = fetchServers(game.PlaceId)
 
--- Filter: skip current server and already visited
-local filtered = {}
+local nextServer = nil
 for _, s in ipairs(servers) do
     if s.id ~= game.JobId and not visited[s.id] then
-        table.insert(filtered, s)
+        nextServer = s
+        break
     end
 end
 
--- Assign slice to this bot
-local myServers = {}
-local i = myIndex
-while i <= #filtered do
-    table.insert(myServers, filtered[i])
-    i = i + botCount
-end
-
-if #myServers == 0 then
-    -- All servers in this place type visited — clear shared list and restart
-    writeJSON(visitedPath, {})
+if not nextServer then
+    -- All servers in this place type done — move to next place type
+    local nextTypeIdx = (currentTypeIdx % #placeTypes) + 1
+    local nextPlaceId = placeTypes[nextTypeIdx]
+    -- Don't clear visited — other bots may still be working
+    -- Just hop to the next place type
     queueSelf()
-    TeleportService:Teleport(game.PlaceId, plr)
+    TeleportService:Teleport(nextPlaceId, plr)
     return
 end
 
--- Claim + hop to next assigned unvisited server
-markVisited(myServers[1].id)
+-- Claim it immediately before teleporting
+markVisited(nextServer.id)
+task.wait(0.1) -- tiny delay so file write completes
 queueSelf()
-TeleportService:TeleportToPlaceInstance(game.PlaceId, myServers[1].id, plr)
+TeleportService:TeleportToPlaceInstance(game.PlaceId, nextServer.id, plr)
