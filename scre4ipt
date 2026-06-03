@@ -1,14 +1,16 @@
--- sniper.lua | Multi-bot server hop sniper for TCO
--- Each bot instance runs this. They coordinate via shared files.
--- Bots split the server list evenly and hop until target is found.
+-- sniper.lua | Server hop sniper for TCO
+-- Each bot runs independently. No coordination needed.
+-- Uses userId as seed to start at different place/server each run.
 
 -- ══ CONFIG ════════════════════════════════════════════════════════════════════
-local WEBHOOK_URL     = "https://discord.com/api/webhooks/1510315625212543108/GTWrn1gg-fnKGKTB3PVIBQdg54GNgVENXCGxZ316g0fJdrxkp4FW0KMwoIVQsOEHQ1Ev"
-local PING_USER       = "<@1034630045198712862>"
-local FOLDER          = "SniperData"
-local SCRIPT_URL      = "https://raw.githubusercontent.com/Bucknbilly/aaaa/refs/heads/main/scre4ipt"
+local WEBHOOK_URL = "https://discord.com/api/webhooks/1510315625212543108/GTWrn1gg-fnKGKTB3PVIBQdg54GNgVENXCGxZ316g0fJdrxkp4FW0KMwoIVQsOEHQ1Ev"
+local PING_USER   = "<@1034630045198712862>"
+local FOLDER      = "SniperData"
+local SCRIPT_URL  = "https://raw.githubusercontent.com/Bucknbilly/aaaa/refs/heads/main/scre4ipt"
+local PLACE_IDS   = {11137575513, 12943245078, 12943247001, 108097274488844}
+local PLACE_NAMES = {[11137575513]="Normal",[12943245078]="XL",[12943247001]="VC",[108097274488844]="OG"}
 
--- Target: read from file if exists, otherwise use the value below (first run only)
+-- Target: persists across teleports via file
 local TARGET_USERNAME
 pcall(makefolder, FOLDER)
 local _tf = FOLDER.."/target.txt"
@@ -16,364 +18,172 @@ local _ok, _saved = pcall(readfile, _tf)
 if _ok and _saved and _saved ~= "" then
     TARGET_USERNAME = _saved
 else
-    TARGET_USERNAME = "TargetNameHere"  -- ← set this on first run
+    TARGET_USERNAME = "TargetNameHere"
     pcall(writefile, _tf, TARGET_USERNAME)
 end
-
--- TCO place IDs
-local PLACE_IDS = {
-    Normal = 11137575513,
-    XL     = 12943245078,
-    VC     = 12943247001,
-    OG     = 108097274488844,
-}
 -- ══ END CONFIG ════════════════════════════════════════════════════════════════
 
-local HttpService      = game:GetService("HttpService")
-local Players          = game:GetService("Players")
-local TeleportService  = game:GetService("TeleportService")
-local MarketplaceService = game:GetService("MarketplaceService")
-
-local plr    = Players.LocalPlayer
-local request = (syn and syn.request) or request or http_request or function() return {StatusCode=0} end
-local queueTP = (syn and syn.queue_on_teleport) or queue_on_teleport or (fluxus and fluxus.queue_on_teleport) or function() end
-
--- ── Queue self immediately on every load (before anything else) ───────────────
+-- ── Queue re-execute FIRST before anything else ───────────────────────────────
 do
     local fn = (syn and syn.queue_on_teleport)
-        or (typeof(queue_on_teleport) == "function" and queue_on_teleport)
+        or (typeof(queue_on_teleport)=="function" and queue_on_teleport)
         or (fluxus and fluxus.queue_on_teleport)
         or (getgenv and getgenv().queue_on_teleport)
     if fn then
-        local ok, err = pcall(fn, "loadstring(game:HttpGet('https://raw.githubusercontent.com/Bucknbilly/aaaa/refs/heads/main/scre4ipt'))()")
-        print("[Sniper] queue_on_teleport: "..(ok and "OK" or tostring(err)))
+        local ok, err = pcall(fn, "loadstring(game:HttpGet('"..SCRIPT_URL.."'))()")
+        print("[Sniper] queue: "..(ok and "OK" or tostring(err)))
     else
-        print("[Sniper] queue_on_teleport: NOT FOUND - re-execute won't work")
+        print("[Sniper] queue_on_teleport NOT FOUND")
     end
 end
 
--- ── File helpers ──────────────────────────────────────────────────────────────
-local function writeJSON(path, data)
-    pcall(writefile, path, HttpService:JSONEncode(data))
-end
-local function readJSON(path)
-    local ok, raw = pcall(readfile, path)
-    if not ok or not raw or raw == "" then return nil end
+local HttpService     = game:GetService("HttpService")
+local Players         = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local plr             = Players.LocalPlayer
+local request         = (syn and syn.request) or request or http_request or function() return {StatusCode=0} end
+
+-- ── Helpers ───────────────────────────────────────────────────────────────────
+local function writeJSON(p, d) pcall(writefile, p, HttpService:JSONEncode(d)) end
+local function readJSON(p)
+    local ok, raw = pcall(readfile, p)
+    if not ok or not raw or raw=="" then return nil end
     local ok2, v = pcall(HttpService.JSONDecode, HttpService, raw)
     return ok2 and v or nil
 end
 
--- ── Determine which place type we're in ───────────────────────────────────────
-local function getServerType()
-    local map = {
-        [11137575513]  = "Normal",
-        [12943245078]  = "XL",
-        [12943247001]  = "VC",
-        [108097274488844] = "OG",
-    }
-    return map[game.PlaceId] or "Unknown"
+local function isFound()
+    local d = readJSON(FOLDER.."/found.json")
+    return d and d.found == true
 end
 
--- ── Fetch server list ─────────────────────────────────────────────────────────
+local function signalFound()
+    writeJSON(FOLDER.."/found.json", {found=true, by=plr.UserId})
+end
+
+local function cleanupAll()
+    pcall(function()
+        for _, f in ipairs(listfiles(FOLDER)) do pcall(delfile, f) end
+    end)
+end
+
+-- Per-bot visited list (independent — no coordination needed)
+local visitedPath = FOLDER.."/v_"..plr.UserId..".json"
+local function getVisited() return readJSON(visitedPath) or {} end
+local function markVisited(id)
+    local v = getVisited(); v[id] = true; writeJSON(visitedPath, v)
+end
+
+-- ── Fetch servers ─────────────────────────────────────────────────────────────
 local function fetchServers(placeId)
     local url = "https://games.roblox.com/v1/games/"..placeId.."/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true"
     local body
-    local ok, result = pcall(function() return game:HttpGet(url, true) end)
-    if ok and result and result ~= "" then
-        body = result
+    local ok, res = pcall(function() return game:HttpGet(url, true) end)
+    if ok and res and res ~= "" then body = res
     else
         local ok2, resp = pcall(request, {Url=url, Method="GET"})
         if ok2 and resp and (resp.StatusCode or 0) == 200 then body = resp.Body end
     end
     if not body then return {} end
     local ok3, data = pcall(HttpService.JSONDecode, HttpService, body)
-    if ok3 and data and data.data then return data.data end
-    return {}
+    return (ok3 and data and data.data) or {}
 end
 
--- ── Bot index: each bot writes its userId, reads all registered bots ──────────
-local function registerBot()
-    local path = FOLDER.."/bot_"..plr.UserId..".json"
-    writeJSON(path, {userId=plr.UserId, name=plr.Name, time=tick()})
-end
-
-local function getBotIds()
-    local ids = {}
-    local ok, files = pcall(listfiles, FOLDER)
-    if not ok then return {plr.UserId} end
-    for _, f in ipairs(files) do
-        if f:find("bot_") then
-            local data = readJSON(f)
-            if data and data.userId then
-                table.insert(ids, data.userId)
-            end
-        end
-    end
-    table.sort(ids)
-    return ids
-end
-
-local function getBotIndex()
-    local ids = getBotIds()
-    for i, id in ipairs(ids) do
-        if id == plr.UserId then return i, #ids end
-    end
-    return 1, 1
-end
-
--- ── Check if target is in current server ─────────────────────────────────────
-local function checkCurrentServer()
+-- ── Check current server for target ──────────────────────────────────────────
+local function checkServer()
     for _, p in ipairs(Players:GetPlayers()) do
-        if p.Name:lower() == TARGET_USERNAME:lower() then
-            return p
-        end
+        if p.Name:lower() == TARGET_USERNAME:lower() then return p end
     end
     return nil
 end
 
--- ── Get target player info ────────────────────────────────────────────────────
-local function getTargetInfo(targetPlr)
-    local hasEnlighten = false
-    local isAdmin      = false
-    local timeVal      = nil
+-- ── Webhook ───────────────────────────────────────────────────────────────────
+local function sendWebhook(targetPlr)
+    local hasEnlighten, isAdmin, timeVal = false, false, nil
+    pcall(function() hasEnlighten = targetPlr.Backpack:FindFirstChild("The Arkenstone")~=nil or (targetPlr.Character and targetPlr.Character:FindFirstChild("The Arkenstone")~=nil) end)
+    pcall(function() isAdmin = targetPlr.Team~=nil and targetPlr.Team.Name=="Chosen" end)
+    pcall(function() local ls=targetPlr:FindFirstChild("leaderstats"); if ls and ls:FindFirstChild("Time") then timeVal=ls.Time.Value end end)
 
-    pcall(function()
-        hasEnlighten = targetPlr.Backpack:FindFirstChild("The Arkenstone") ~= nil
-            or (targetPlr.Character and targetPlr.Character:FindFirstChild("The Arkenstone") ~= nil)
-    end)
-    pcall(function()
-        isAdmin = targetPlr.Team ~= nil and targetPlr.Team.Name == "Chosen"
-    end)
-    pcall(function()
-        local ls = targetPlr:FindFirstChild("leaderstats")
-        if ls and ls:FindFirstChild("Time") then
-            timeVal = ls.Time.Value
-        end
-    end)
-
-    return hasEnlighten, isAdmin, timeVal
-end
-
--- ── Send found webhook ────────────────────────────────────────────────────────
-local function sendFoundWebhook(targetPlr)
-    local hasEnlighten, isAdmin, timeVal = getTargetInfo(targetPlr)
-    local serverType = getServerType()
-    local jobId      = tostring(game.JobId or "")
-    local placeId    = game.PlaceId
-
-    local joinURL = string.format(
-    "[Join Server](roblox://experiences/start?placeId=%d&gameInstanceId=%s)",
-    placeId, jobId
-)
-
-    local statusParts = {}
-    if hasEnlighten then table.insert(statusParts, "✨ Enlightened") end
-    if isAdmin       then table.insert(statusParts, "👑 Admin") end
-    if timeVal       then table.insert(statusParts, "⏱ Time: "..tostring(timeVal)) end
-    local statusStr = #statusParts > 0 and table.concat(statusParts, " | ") or "No special status"
-
-    local embed = {
-        title       = "🎯 Target Found: "..TARGET_USERNAME,
-        description = PING_USER.."\n"..joinURL,
-        color       = 0xFF4444,
-        thumbnail   = {
-            url = string.format(
-                "https://www.roblox.com/headshot-thumbnail/image?userId=%d&width=420&height=420&format=png",
-                targetPlr.UserId
-            )
-        },
-        fields = {
-            {
-                name   = "👤 Target",
-                value  = string.format("**%s** (`%s`)\nID: `%d`", targetPlr.DisplayName, targetPlr.Name, targetPlr.UserId),
-                inline = true
-            },
-            {
-                name   = "🎮 Server",
-                value  = string.format("**%s** — %s\n%d/%d players\nJob ID: `%s`",
-                    serverType, serverType,
-                    #Players:GetPlayers(), Players.MaxPlayers,
-                    jobId ~= "" and jobId or "unknown"),
-                inline = true
-            },
-            {
-                name   = "⚡ Status",
-                value  = statusStr,
-                inline = false
-            },
-            {
-                name   = "🤖 Found by",
-                value  = plr.Name.." (`"..plr.UserId.."`)",
-                inline = false
-            }
-        },
-        footer    = {text = "MikeyHub Sniper"},
-        timestamp = DateTime.now():ToIsoDate()
-    }
+    local jobId   = tostring(game.JobId or "")
+    local joinURL = string.format("[Join](roblox://experiences/start?placeId=%d&gameInstanceId=%s)", game.PlaceId, jobId)
+    local status  = table.concat({hasEnlighten and "✨ Enlightened" or nil, isAdmin and "👑 Admin" or nil, timeVal and "⏱ "..tostring(timeVal) or nil}, " | ")
+    if status == "" then status = "—" end
 
     pcall(request, {
-        Url     = WEBHOOK_URL,
-        Method  = "POST",
-        Headers = {["Content-Type"] = "application/json"},
-        Body    = HttpService:JSONEncode({content = PING_USER, embeds = {embed}})
+        Url    = WEBHOOK_URL, Method = "POST",
+        Headers = {["Content-Type"]="application/json"},
+        Body   = HttpService:JSONEncode({
+            content = PING_USER,
+            embeds  = {{
+                title       = "🎯 Found: "..TARGET_USERNAME,
+                description = joinURL,
+                color       = 0xFF4444,
+                thumbnail   = {url="https://www.roblox.com/headshot-thumbnail/image?userId="..targetPlr.UserId.."&width=420&height=420&format=png"},
+                fields = {
+                    {name="👤 Target",  value=string.format("**%s** (`%s`) ID:`%d`", targetPlr.DisplayName, targetPlr.Name, targetPlr.UserId), inline=true},
+                    {name="🎮 Server",  value=string.format("%s | %d/%d players\nJob: `%s`", PLACE_NAMES[game.PlaceId] or "?", #Players:GetPlayers(), Players.MaxPlayers, jobId), inline=true},
+                    {name="⚡ Status",  value=status, inline=false},
+                    {name="🤖 Bot",     value=plr.Name.." (`"..plr.UserId.."`)", inline=false},
+                },
+                footer    = {text="MikeyHub Sniper"},
+                timestamp = DateTime.now():ToIsoDate()
+            }}
+        })
     })
 end
 
--- ── Cleanup all sniper data ───────────────────────────────────────────────────
-local function cleanupAll()
-    pcall(function()
-        local files = listfiles(FOLDER)
-        for _, f in ipairs(files) do
-            pcall(delfile, f)
-        end
-    end)
-end
-
--- ── Signal found to all bots + cleanup ───────────────────────────────────────
-local function signalFound()
-    writeJSON(FOLDER.."/found.json", {found=true, by=plr.UserId, time=tick()})
-end
-
-local function isFound()
-    local data = readJSON(FOLDER.."/found.json")
-    return data and data.found == true
-end
-
--- ── Queue self-rerun on teleport ──────────────────────────────────────────────
-local function queueSelf()
-    local fn = (syn and syn.queue_on_teleport)
-        or (typeof(queue_on_teleport) == "function" and queue_on_teleport)
-        or (fluxus and fluxus.queue_on_teleport)
-    if fn then
-        local ok, err = pcall(fn, "loadstring(game:HttpGet('"..SCRIPT_URL.."'))()")
-        print("[Sniper] queueSelf: "..(ok and "queued OK" or "FAILED: "..tostring(err)))
-    else
-        print("[Sniper] queueSelf: queue_on_teleport NOT FOUND on this executor")
-    end
-end
-
--- ── Live found-signal watcher (shuts down this instance if another bot found target) ──
-local watching = true
-task.spawn(function()
-    while watching do
-        task.wait(2)
-        if isFound() then
-            watching = false
-            cleanupAll()
-            pcall(function() game:Shutdown() end)
-        end
-    end
-end)
-
--- ── Live watcher: shut down immediately if another bot found target ───────────
+-- ── Live watcher: stop if another bot found target ────────────────────────────
 task.spawn(function()
     while true do
         task.wait(2)
-        if isFound() then
-            cleanupAll()
-            pcall(function() game:Shutdown() end)
-            return
-        end
+        if isFound() then cleanupAll(); pcall(game.Shutdown, game); return end
     end
 end)
 
--- ── Track visited servers (shared across all bots) ───────────────────────────
-local visitedPath = FOLDER.."/visited_shared.json"
-
-local function getVisited()
-    return readJSON(visitedPath) or {}
-end
-
-local function markVisited(jobId)
-    local v = getVisited()
-    v[jobId] = true
-    writeJSON(visitedPath, v)
-end
-
--- ── Main sniper loop ──────────────────────────────────────────────────────────
-registerBot()
-task.wait(2)
-
+-- ── Main ──────────────────────────────────────────────────────────────────────
 if isFound() then return end
 
--- Mark current server as visited
+-- Mark current server visited
 markVisited(game.JobId)
 
--- Check current server first
-local found = checkCurrentServer()
+-- Check current server
+local found = checkServer()
 if found then
-    sendFoundWebhook(found)
+    sendWebhook(found)
     signalFound()
-    task.wait(1) -- give other bots a moment to read found.json
+    task.wait(1)
     cleanupAll()
-    pcall(function() game:Shutdown() end)
+    pcall(game.Shutdown, game)
     return
 end
 
-local placeTypes   = {11137575513, 12943245078, 12943247001, 108097274488844}
-local placeNames   = {[11137575513]="Normal",[12943245078]="XL",[12943247001]="VC",[108097274488844]="OG"}
-local claimsPath   = FOLDER.."/claims.json"
+-- Determine which place type to search
+-- Use userId to pick a starting place so bots naturally spread out
+local placeIdx = (plr.UserId % #PLACE_IDS) + 1
+local myPlace  = PLACE_IDS[placeIdx]
 
--- Read current claims {placeId = userId}
-local function getClaims()
-    return readJSON(claimsPath) or {}
-end
-
--- Claim a place type for this bot (first run only)
-local function claimPlaceType()
-    local claims = getClaims()
-    -- Already claimed?
-    for pid, uid in pairs(claims) do
-        if uid == plr.UserId then return tonumber(pid) end
-    end
-    -- Find first unclaimed place type
-    for _, pid in ipairs(placeTypes) do
-        if not claims[tostring(pid)] then
-            claims[tostring(pid)] = plr.UserId
-            writeJSON(claimsPath, claims)
-            print("[Sniper] Claimed: "..placeNames[pid])
-            return pid
-        end
-    end
-    -- All claimed — take the one with fewest bots (just wrap around)
-    local idx = (#getClaims() % #placeTypes) + 1
-    return placeTypes[idx]
-end
-
-local myPlaceId = claimPlaceType()
-
--- If not in assigned place, go there first
-if game.PlaceId ~= myPlaceId then
-    queueSelf()
-    TeleportService:Teleport(myPlaceId, plr)
+-- If not in assigned place, go there
+if game.PlaceId ~= myPlace then
+    TeleportService:Teleport(myPlace, plr)
     return
 end
 
--- Fetch servers, pick first unclaimed
-local visited    = getVisited()
-local servers    = fetchServers(game.PlaceId)
-local nextServer = nil
+-- Find next unvisited server
+local visited = getVisited()
+local servers = fetchServers(game.PlaceId)
+local next    = nil
 for _, s in ipairs(servers) do
     if s.id ~= game.JobId and not visited[s.id] then
-        nextServer = s; break
+        next = s; break
     end
 end
 
-if not nextServer then
-    -- Exhausted this place — clear only this place's visited entries and restart
-    local v = getVisited()
-    local fresh = {}
-    for id, val in pairs(v) do
-        -- keep other bots' claimed servers, only clear ours
-        fresh[id] = val
-    end
+if not next then
+    -- All servers checked in this place — clear and restart
     writeJSON(visitedPath, {})
-    queueSelf()
-    TeleportService:Teleport(myPlaceId, plr)
+    TeleportService:Teleport(game.PlaceId, plr)
     return
 end
 
-markVisited(nextServer.id)
-task.wait(0.1)
-queueSelf()
-TeleportService:TeleportToPlaceInstance(game.PlaceId, nextServer.id, plr)
+markVisited(next.id)
+TeleportService:TeleportToPlaceInstance(game.PlaceId, next.id, plr)
