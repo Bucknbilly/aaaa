@@ -71,7 +71,7 @@ end
 local visitedPath = FOLDER.."/v_"..plr.UserId..".json"
 local function getVisited() return readJSON(visitedPath) or {} end
 local function markVisited(id)
-    local v = getVisited(); v[id] = true; writeJSON(visitedPath, v)
+    local v = getVisited(); v[tostring(id)] = true; writeJSON(visitedPath, v)
 end
 
 -- ── Fetch servers ─────────────────────────────────────────────────────────────
@@ -144,7 +144,7 @@ end)
 if isFound() then return end
 
 -- Mark current server visited
-markVisited(game.JobId)
+markVisited(tostring(game.JobId))
 
 -- Check current server
 local found = checkServer()
@@ -157,33 +157,41 @@ if found then
     return
 end
 
--- Determine which place type to search
--- Use userId to pick a starting place so bots naturally spread out
-local placeIdx = (plr.UserId % #PLACE_IDS) + 1
-local myPlace  = PLACE_IDS[placeIdx]
+-- Pick a random place and random unvisited server
+local visited = getVisited()
+local next    = nil
+local nextPlace = nil
 
--- If not in assigned place, go there
-if game.PlaceId ~= myPlace then
-    TeleportService:Teleport(myPlace, plr)
-    return
+-- Shuffle place order randomly
+local places = {table.unpack(PLACE_IDS)}
+for i = #places, 2, -1 do
+    local j = math.random(i)
+    places[i], places[j] = places[j], places[i]
 end
 
--- Find next unvisited server
-local visited = getVisited()
-local servers = fetchServers(game.PlaceId)
-local next    = nil
-for _, s in ipairs(servers) do
-    if s.id ~= game.JobId and not visited[s.id] then
-        next = s; break
+for _, placeId in ipairs(places) do
+    local servers = fetchServers(placeId)
+    -- Shuffle servers too
+    for i = #servers, 2, -1 do
+        local j = math.random(i)
+        servers[i], servers[j] = servers[j], servers[i]
     end
+    for _, s in ipairs(servers) do
+        if not visited[tostring(s.id)] then
+            next = s
+            nextPlace = placeId
+            break
+        end
+    end
+    if next then break end
 end
 
 if not next then
-    -- All servers checked in this place — clear and restart
     writeJSON(visitedPath, {})
-    TeleportService:Teleport(game.PlaceId, plr)
+    TeleportService:Teleport(PLACE_IDS[math.random(#PLACE_IDS)], plr)
     return
 end
 
-markVisited(next.id)
-TeleportService:TeleportToPlaceInstance(game.PlaceId, next.id, plr)
+markVisited(tostring(next.id))
+task.wait(0.2)
+TeleportService:TeleportToPlaceInstance(nextPlace, next.id, plr)
